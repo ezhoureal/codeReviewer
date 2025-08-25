@@ -1,4 +1,5 @@
 # Overview
+
 This is an AI agent that takes in a directory of a git repository and reviews the code changes to ensure forward compatibility of that repository.
 
 # Strategy
@@ -10,3 +11,8 @@ This is an AI agent that takes in a directory of a git repository and reviews th
 
 # Usage
 run `cargo run [directory]`, where [directory] points to the git repository you want to analyze.
+
+# Future work
+- [ ] Stress test with large chunk of diff
+- [ ] Content splitting / compression when diff is too large
+- [ ] Provide more tools to LLM and support multi-round (let LLM run tests, inspect files, get project structure overview, etc.)
