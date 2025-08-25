@@ -134,7 +134,7 @@ impl CodeReviewer {
         }
 
         let body = json!({
-            "model": "kimi-k2-0711-preview",
+            "model": "kimi-k2-turbo-preview",
             "messages": [
                 {
                     "role": "system",
