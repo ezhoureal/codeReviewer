@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
 use std::process::Command;
+use futures::StreamExt;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct KimiResponse {
@@ -18,6 +19,21 @@ struct Choice {
 #[derive(Debug, Serialize, Deserialize)]
 struct Message {
     content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StreamResponse {
+    choices: Vec<StreamChoice>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +161,8 @@ impl CodeReviewer {
                     "content": prompt
                 }
             ],
-            "temperature": 0.3
+            "temperature": 0.3,
+            "stream": true
         });
 
         let response = client
@@ -166,16 +183,49 @@ impl CodeReviewer {
             anyhow::bail!("API request failed with status {}: {}", status, error_text);
         }
 
-        let kimi_response: KimiResponse = response
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        // Process the streaming response
+        let mut stream = response.bytes_stream();
+        let mut complete_response = String::new();
+        let mut buffer = String::new();
 
-        if kimi_response.choices.is_empty() {
-            anyhow::bail!("No response from Kimi API");
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Failed to read stream chunk")?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&chunk_str);
+            
+            let partial_content = self.process_buffer_lines(&mut buffer);
+            print!("{}", partial_content);
+            complete_response.push_str(&partial_content);
         }
 
-        Ok(kimi_response.choices[0].message.content.clone())
+        println!(); // Add a newline at the end
+        Ok(complete_response)
+    }
+
+    fn process_buffer_lines(&self, buffer: &mut String) -> String {
+        let mut partial_content = String::new();
+        
+        // Process complete lines from the buffer
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].to_string();
+            *buffer = buffer[line_end + 1..].to_string();
+
+            if line.trim().is_empty() || line.trim() == "data: [DONE]" {
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(stream_response) = serde_json::from_str::<StreamResponse>(data) {
+                    if stream_response.choices.is_empty() {
+                        continue;
+                    }
+                    if let Some(content) = &stream_response.choices[0].delta.content {
+                        partial_content.push_str(content);
+                    }
+                }
+            }
+        }
+        partial_content
     }
 
     pub async fn review_changes(&self) -> Result<()> {
@@ -196,11 +246,11 @@ impl CodeReviewer {
         }
 
         println!("\n🤖 Analyzing changes with AI...");
-        let analysis = self.analyze_with_kimi(&diffs).await?;
-
         println!("🔍 CODE REVIEW ANALYSIS");
         println!("{}", "=".repeat(80));
-        println!("{}", analysis);
+        
+        let _analysis = self.analyze_with_kimi(&diffs).await?;
+        
         println!("{}", "=".repeat(80));
 
         Ok(())
