@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_valid_api_key() {
+    fn test_new() {
         env::set_var(API_KEY, "test_key");
         let repo_path = "/tmp/test".to_string();
 
@@ -274,11 +274,7 @@ mod tests {
         let reviewer = result.unwrap();
         assert_eq!(reviewer.repo_path, repo_path);
         assert_eq!(reviewer.api_key, "test_key");
-    }
-
-    #[test]
-    fn test_new_without_api_key() {
-        env::remove_var("MOONSHOT_API_KEY");
+        env::remove_var(API_KEY);
         let repo_path = "/tmp/test".to_string();
 
         let result = CodeReviewer::new(repo_path);
