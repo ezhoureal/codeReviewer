@@ -127,7 +127,7 @@ impl CodeReviewer {
         }
 
         let body = json!({
-            "model": "moonshot-v1-8k",
+            "model": "kimi-k2-0711-preview",
             "messages": [
                 {
                     "role": "system",
@@ -151,8 +151,9 @@ impl CodeReviewer {
             .context("Failed to send request to Kimi API")?;
 
         if !response.status().is_success() {
+            let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("API request failed with status {}: {}", response.status(), error_text);
+            anyhow::bail!("API request failed with status {}: {}", status, error_text);
         }
 
         let kimi_response: KimiResponse = response.json().await
@@ -185,11 +186,10 @@ impl CodeReviewer {
         println!("\n🤖 Analyzing changes with AI...");
         let analysis = self.analyze_with_kimi(&diffs).await?;
 
-        println!("\n" + "=".repeat(80).as_str());
         println!("🔍 CODE REVIEW ANALYSIS");
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
         println!("{}", analysis);
-        println!("=".repeat(80));
+        println!("{}", "=".repeat(80));
 
         Ok(())
     }
