@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
 use std::process::Command;
-use futures::StreamExt;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct KimiResponse {
@@ -192,7 +192,7 @@ impl CodeReviewer {
             let chunk = chunk.context("Failed to read stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
             buffer.push_str(&chunk_str);
-            
+
             let partial_content = self.process_buffer_lines(&mut buffer);
             print!("{}", partial_content);
             complete_response.push_str(&partial_content);
@@ -204,7 +204,7 @@ impl CodeReviewer {
 
     fn process_buffer_lines(&self, buffer: &mut String) -> String {
         let mut partial_content = String::new();
-        
+
         // Process complete lines from the buffer
         while let Some(line_end) = buffer.find('\n') {
             let line = buffer[..line_end].to_string();
@@ -248,9 +248,9 @@ impl CodeReviewer {
         println!("\n🤖 Analyzing changes with AI...");
         println!("🔍 CODE REVIEW ANALYSIS");
         println!("{}", "=".repeat(80));
-        
+
         let _analysis = self.analyze_with_kimi(&diffs).await?;
-        
+
         println!("{}", "=".repeat(80));
 
         Ok(())
@@ -407,5 +407,84 @@ mod tests {
         assert_eq!(diffs[0].file_path, "test.txt");
         assert!(diffs[0].content.contains("modified content"));
         assert!(diffs[0].content.contains("initial content"));
+    }
+
+    #[test]
+    fn test_process_buffer_lines() {
+        let reviewer =
+            CodeReviewer::new_with_api_key("/tmp/test".to_string(), "test_key".to_string());
+
+        // Test data from the actual API response
+        let mut buffer = String::from(
+            "data: {\"id\":\"chatcmpl-68ac691c9a297e4c33c9a748\",\"object\":\"chat.completion.chunk\",\"created\":1756129564,\"model\":\"kimi-k2-turbo-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" is\"},\"finish_reason\":null}],\"system_fingerprint\":\"fpv0_6f6e304c\"}\n\
+            data: {\"id\":\"chatcmpl-68ac691c9a297e4c33c9a748\",\"object\":\"chat.completion.chunk\",\"created\":1756129564,\"model\":\"kimi-k2-turbo-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" consistent\"},\"finish_reason\":null}],\"system_fingerprint\":\"fpv0_6f6e304c\"}\n\
+            data: {\"id\":\"chatcmpl-68ac691c9a297e4c33c9a748\",\"object\":\"chat.completion.chunk\",\"created\":1756129564,\"model\":\"kimi-k2-turbo-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" with\"},\"finish_reason\":null}],\"system_fingerprint\":\"fpv0_6f6e304c\"}\n\
+            data: {\"id\":\"chatcmpl-68ac691c9a297e4c33c9a748\",\"object\":\"chat.completion.chunk\",\"created\":1756129564,\"model\":\"kimi-k2-turbo-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" the\"},\"finish_reason\":null}],\"system_fingerprint\":\"fpv0_6f6e304c\"}\n\
+            data: {\"id\":\"chatcmpl-68ac691c9a297e4c33c9a748\",\"object\":\"chat.completion.chunk\",\"created\":1756129564,\"model\":\"kimi-k2-turbo-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" coding\"},\"finish_reason\":null}],\"system_fingerprint\":\"fpv0_6f6e304c\"}\n"
+        );
+
+        let result = reviewer.process_buffer_lines(&mut buffer);
+
+        // Should extract and concatenate all the content from the delta fields
+        assert_eq!(result, " is consistent with the coding");
+
+        // Buffer should be empty after processing complete lines
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_process_buffer_lines_with_incomplete_line() {
+        let reviewer =
+            CodeReviewer::new_with_api_key("/tmp/test".to_string(), "test_key".to_string());
+
+        // Test with an incomplete line at the end (no newline)
+        let mut buffer = String::from(
+            "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\
+            data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}"
+        );
+
+        let result = reviewer.process_buffer_lines(&mut buffer);
+
+        // Should only process the complete line
+        assert_eq!(result, "hello");
+
+        // Incomplete line should remain in buffer
+        assert_eq!(buffer, "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}");
+    }
+
+    #[test]
+    fn test_process_buffer_lines_with_empty_lines_and_done() {
+        let reviewer =
+            CodeReviewer::new_with_api_key("/tmp/test".to_string(), "test_key".to_string());
+
+        let mut buffer = String::from(
+            "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"test\"},\"finish_reason\":null}]}\n\
+            \n\
+            data: [DONE]\n\
+            data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" content\"},\"finish_reason\":null}]}\n"
+        );
+
+        let result = reviewer.process_buffer_lines(&mut buffer);
+
+        // Should skip empty lines and [DONE] messages, only process actual content
+        assert_eq!(result, "test content");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_process_buffer_lines_with_empty_choices() {
+        let reviewer =
+            CodeReviewer::new_with_api_key("/tmp/test".to_string(), "test_key".to_string());
+
+        let mut buffer = String::from(
+            "data: {\"id\":\"test\",\"choices\":[]}\n\
+            data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"valid\"},\"finish_reason\":null}]}\n"
+        );
+
+        let result = reviewer.process_buffer_lines(&mut buffer);
+
+        // Should skip empty choices array, only process valid content
+        assert_eq!(result, "valid");
+        assert!(buffer.is_empty());
     }
 }
