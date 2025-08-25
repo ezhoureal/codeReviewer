@@ -1,9 +1,9 @@
-use std::env;
-use std::process::Command;
+use anyhow::{Context, Result};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use anyhow::{Result, Context};
+use std::env;
+use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct KimiResponse {
@@ -20,25 +20,29 @@ struct Message {
     content: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct GitDiff {
     file_path: String,
     content: String,
 }
 
+#[derive(Debug)]
 pub struct CodeReviewer {
     api_key: String,
     repo_path: String,
 }
 
+const API_KEY: &str = "MOONSHOT_API_KEY";
+
 impl CodeReviewer {
     pub fn new(repo_path: String) -> Result<Self> {
-        let api_key = env::var("MOONSHOT_API_KEY")
-            .context("MOONSHOT_API_KEY environment variable not set")?;
-        
-        Ok(CodeReviewer {
-            api_key,
-            repo_path,
-        })
+        let api_key = env::var(API_KEY).context("MOONSHOT_API_KEY environment variable not set")?;
+
+        Ok(CodeReviewer { api_key, repo_path })
+    }
+
+    fn new_with_api_key(repo_path: String, api_key: String) -> Self {
+        CodeReviewer { api_key, repo_path }
     }
 
     fn validate_git_repository(&self) -> Result<()> {
@@ -64,7 +68,10 @@ impl CodeReviewer {
             .context("Failed to get list of modified files")?;
 
         if !output.status.success() {
-            anyhow::bail!("Failed to get git diff: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "Failed to get git diff: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let files = String::from_utf8(output.stdout)?;
@@ -98,7 +105,7 @@ impl CodeReviewer {
 
     async fn analyze_with_kimi(&self, diffs: &[GitDiff]) -> Result<String> {
         let client = reqwest::Client::new();
-        
+
         // Prepare the prompt for the LLM
         let mut prompt = String::from(
             "You are a senior code reviewer. Analyze the following git diffs to identify potential breaking changes that could affect the behavior of the software. \
@@ -120,7 +127,10 @@ impl CodeReviewer {
         );
 
         for diff in diffs {
-            prompt.push_str(&format!("### File: {}\n```diff\n{}\n```\n\n", diff.file_path, diff.content));
+            prompt.push_str(&format!(
+                "### File: {}\n```diff\n{}\n```\n\n",
+                diff.file_path, diff.content
+            ));
         }
 
         let body = json!({
@@ -149,11 +159,16 @@ impl CodeReviewer {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             anyhow::bail!("API request failed with status {}: {}", status, error_text);
         }
 
-        let kimi_response: KimiResponse = response.json().await
+        let kimi_response: KimiResponse = response
+            .json()
+            .await
             .context("Failed to parse API response")?;
 
         if kimi_response.choices.is_empty() {
@@ -189,5 +204,162 @@ impl CodeReviewer {
         println!("{}", "=".repeat(80));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn setup_git_repo() -> TempDir {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let repo_path = temp_dir.path();
+
+        // Initialize git repository
+        Command::new("git")
+            .args(&["init"])
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to initialize git repository");
+
+        // Configure git user for tests
+        Command::new("git")
+            .args(&["config", "user.email", "test@example.com"])
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to configure git user email");
+
+        Command::new("git")
+            .args(&["config", "user.name", "Test User"])
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to configure git user name");
+
+        temp_dir
+    }
+
+    fn create_test_file(repo_path: &std::path::Path, filename: &str, content: &str) {
+        let file_path = repo_path.join(filename);
+        let mut file = File::create(file_path).expect("Failed to create test file");
+        file.write_all(content.as_bytes())
+            .expect("Failed to write to test file");
+    }
+
+    fn git_add_and_commit(repo_path: &std::path::Path, message: &str) {
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to git add");
+
+        Command::new("git")
+            .args(&["commit", "-m", message])
+            .current_dir(repo_path)
+            .output()
+            .expect("Failed to git commit");
+    }
+
+    #[test]
+    fn test_new_with_valid_api_key() {
+        env::set_var(API_KEY, "test_key");
+        let repo_path = "/tmp/test".to_string();
+
+        let result = CodeReviewer::new(repo_path.clone());
+        assert!(result.is_ok());
+
+        let reviewer = result.unwrap();
+        assert_eq!(reviewer.repo_path, repo_path);
+        assert_eq!(reviewer.api_key, "test_key");
+    }
+
+    #[test]
+    fn test_new_without_api_key() {
+        env::remove_var("MOONSHOT_API_KEY");
+        let repo_path = "/tmp/test".to_string();
+
+        let result = CodeReviewer::new(repo_path);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("MOONSHOT_API_KEY environment variable not set"));
+    }
+
+    #[test]
+    fn test_validate_git_repository_valid() {
+        let temp_dir = setup_git_repo();
+        let reviewer = CodeReviewer::new_with_api_key(
+            temp_dir.path().to_string_lossy().to_string(),
+            "test_key".to_string(),
+        );
+
+        let result = reviewer.validate_git_repository();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_git_repository_invalid() {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let reviewer = CodeReviewer::new_with_api_key(
+            temp_dir.path().to_string_lossy().to_string(),
+            "test_key".to_string(),
+        );
+
+        let result = reviewer.validate_git_repository();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not a git repository"));
+    }
+
+    #[test]
+    fn test_get_unstaged_changes_no_changes() {
+        let temp_dir = setup_git_repo();
+        let repo_path = temp_dir.path();
+
+        // Create and commit a file
+        create_test_file(repo_path, "test.txt", "initial content");
+        git_add_and_commit(repo_path, "Initial commit");
+
+        let reviewer = CodeReviewer::new_with_api_key(
+            repo_path.to_string_lossy().to_string(),
+            "test_key".to_string(),
+        );
+
+        let result = reviewer.get_unstaged_changes();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_unstaged_changes_with_modifications() {
+        let temp_dir = setup_git_repo();
+        let repo_path = temp_dir.path();
+
+        // Create and commit a file
+        create_test_file(repo_path, "test.txt", "initial content");
+        git_add_and_commit(repo_path, "Initial commit");
+
+        // Modify the file
+        create_test_file(repo_path, "test.txt", "modified content");
+
+        let reviewer = CodeReviewer::new_with_api_key(
+            repo_path.to_string_lossy().to_string(),
+            "test_key".to_string(),
+        );
+
+        let result = reviewer.get_unstaged_changes();
+        assert!(result.is_ok());
+
+        let diffs = result.unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].file_path, "test.txt");
+        assert!(diffs[0].content.contains("modified content"));
+        assert!(diffs[0].content.contains("initial content"));
     }
 }

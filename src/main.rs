@@ -6,7 +6,6 @@ use std::path::Path;
 use anyhow::Result;
 use clap::{Arg, Command as ClapCommand};
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches = ClapCommand::new("Code Reviewer")
